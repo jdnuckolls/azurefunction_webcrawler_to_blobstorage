@@ -5,8 +5,8 @@
 azure-functions
 azure-identity
 azure-storage-blob
-playwright
 requests
+playwright
 beautifulsoup4
 PyPDF2
 python-dateutil
@@ -17,5 +17,8 @@ pandas
 xlrd
 readability-lxml
 lxml
+
+# Optional legacy mode when EMBED_LOCALLY=true. The default path lets
+# Azure AI Search integrated vectorization handle chunking and embeddings.
 openai
 tiktoken

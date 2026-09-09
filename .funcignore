@@ -1,1 +1,21 @@
 
+.git/
+.github/
+.azure/
+.vscode/
+.venv/
+.python_packages/
+__pycache__/
+*.pyc
+
+.env
+local.settings.json
+
+__blobstorage__
+__queuestorage__
+__azurite_db*__.json
+
+node_modules/
+dist/
+build/
+*.log
