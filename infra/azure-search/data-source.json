@@ -1,0 +1,10 @@
+{
+  "name": "{{dataSourceName}}",
+  "type": "azureblob",
+  "credentials": {
+    "connectionString": "{{storageConnectionString}}"
+  },
+  "container": {
+    "name": "{{contentContainerName}}"
+  }
+}

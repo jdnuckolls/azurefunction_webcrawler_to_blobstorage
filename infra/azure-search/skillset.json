@@ -1,0 +1,125 @@
+{
+  "name": "{{skillsetName}}",
+  "description": "Split normalized website content and generate Azure OpenAI embeddings for RAG.",
+  "skills": [
+    {
+      "@odata.type": "#Microsoft.Skills.Text.SplitSkill",
+      "name": "split-content",
+      "description": "Split normalized page content into retrieval-sized chunks.",
+      "context": "/document",
+      "textSplitMode": "pages",
+      "maximumPageLength": 2000,
+      "pageOverlapLength": 300,
+      "defaultLanguageCode": "en",
+      "inputs": [
+        {
+          "name": "text",
+          "source": "/document/content"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "textItems",
+          "targetName": "pages"
+        }
+      ]
+    },
+    {
+      "@odata.type": "#Microsoft.Skills.Text.AzureOpenAIEmbeddingSkill",
+      "name": "embed-content",
+      "description": "Generate embeddings for each content chunk.",
+      "context": "/document/pages/*",
+      "resourceUri": "{{azureOpenAIEndpoint}}",
+      "apiKey": "{{azureOpenAIKey}}",
+      "deploymentId": "{{azureOpenAIEmbeddingDeployment}}",
+      "modelName": "text-embedding-3-small",
+      "dimensions": 1536,
+      "inputs": [
+        {
+          "name": "text",
+          "source": "/document/pages/*"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "embedding",
+          "targetName": "content_vector"
+        }
+      ]
+    }
+  ],
+  "indexProjections": {
+    "selectors": [
+      {
+        "targetIndexName": "{{searchIndexName}}",
+        "parentKeyFieldName": "parent_id",
+        "sourceContext": "/document/pages/*",
+        "mappings": [
+          {
+            "name": "content",
+            "source": "/document/pages/*"
+          },
+          {
+            "name": "content_vector",
+            "source": "/document/pages/*/content_vector"
+          },
+          {
+            "name": "url",
+            "source": "/document/url"
+          },
+          {
+            "name": "canonical_url",
+            "source": "/document/canonical_url"
+          },
+          {
+            "name": "title",
+            "source": "/document/title"
+          },
+          {
+            "name": "content_format",
+            "source": "/document/content_format"
+          },
+          {
+            "name": "content_type",
+            "source": "/document/content_type"
+          },
+          {
+            "name": "crawl_timestamp",
+            "source": "/document/crawl_timestamp"
+          },
+          {
+            "name": "last_modified",
+            "source": "/document/last_modified"
+          },
+          {
+            "name": "site",
+            "source": "/document/site"
+          },
+          {
+            "name": "path",
+            "source": "/document/path"
+          },
+          {
+            "name": "depth",
+            "source": "/document/depth"
+          },
+          {
+            "name": "parent_url",
+            "source": "/document/parent_url"
+          },
+          {
+            "name": "content_hash",
+            "source": "/document/content_hash"
+          },
+          {
+            "name": "source_engine",
+            "source": "/document/source_engine"
+          }
+        ]
+      }
+    ],
+    "parameters": {
+      "projectionMode": "skipIndexingParentDocuments"
+    }
+  }
+}

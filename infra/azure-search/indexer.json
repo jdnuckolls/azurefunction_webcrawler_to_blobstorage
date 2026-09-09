@@ -1,0 +1,25 @@
+{
+  "name": "{{indexerName}}",
+  "dataSourceName": "{{dataSourceName}}",
+  "targetIndexName": "{{searchIndexName}}",
+  "skillsetName": "{{skillsetName}}",
+  "schedule": {
+    "interval": "PT2H"
+  },
+  "fieldMappings": [
+    {
+      "sourceFieldName": "metadata_storage_path",
+      "targetFieldName": "parent_id",
+      "mappingFunction": {
+        "name": "base64Encode"
+      }
+    }
+  ],
+  "parameters": {
+    "configuration": {
+      "parsingMode": "json",
+      "dataToExtract": "contentAndMetadata",
+      "indexedFileNameExtensions": ".json"
+    }
+  }
+}
