@@ -6,9 +6,10 @@ import json
 import requests
 import hashlib
 import threading
+from datetime import datetime, timezone
 from collections import deque
 from io import BytesIO
-from urllib.parse import urlparse, urljoin, urlunparse
+from urllib.parse import quote, urlparse, urljoin, urlunparse
 from urllib import robotparser
 from threading import Lock
 from xml.etree import ElementTree as ET
@@ -23,8 +24,6 @@ import pandas as pd
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
-import openai
-import tiktoken
 
 
 # ---- LOGGING ----
@@ -58,13 +57,24 @@ USER_AGENT = os_env("USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) App
 RETRY_COUNT = int(os_env("RETRY_COUNT", "3"))
 RETRY_BACKOFF = float(os_env("RETRY_BACKOFF_FACTOR", "2"))
 SAVE_404 = os_env("SAVE_404", "false").lower() == "true"
+CRAWLER_ENGINE = os_env("CRAWLER_ENGINE", "native").strip().lower()
+OUTPUT_MODE = os_env("OUTPUT_MODE", "source").strip().lower()
+EMBED_LOCALLY = os_env("EMBED_LOCALLY", "false").lower() == "true"
+SOURCE_FORMAT = os_env("SOURCE_FORMAT", "auto").strip().lower()
 
-api_key = os.environ["AZURE_OPENAI_API_KEY"]
-endpoint = os.environ["AZURE_OPENAI_ENDPOINT"]
+api_key = os_env("AZURE_OPENAI_API_KEY")
+endpoint = os_env("AZURE_OPENAI_ENDPOINT")
 api_version = os_env("AZURE_OPENAI_API_VERSION", "2023-05-15")
 EMBEDDING_DEPLOYMENT_NAME = os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME", "myproject-text-embedding-ada-002") # This is the CUSTOM name YOU give the model (often the same as the actual).
 EMBEDDING_MODEL_NAME = os.environ.get("AZURE_OPENAI_EMBEDDING_MODEL_NAME", "text-embedding-ada-002") # This is the actual model name. 
 EMBEDDING_TOKEN_LIMIT = int(os_env("EMBEDDING_TOKEN_LIMIT", "8191")) # Default to 8191 for ada-002 and 3-small
+
+if EMBED_LOCALLY and (not api_key or not endpoint):
+    raise RuntimeError("AZURE_OPENAI_API_KEY and AZURE_OPENAI_ENDPOINT are required when EMBED_LOCALLY=true")
+
+if EMBED_LOCALLY:
+    import openai
+    import tiktoken
 
 cred = DefaultAzureCredential()
 blob_service = BlobServiceClient(
@@ -107,6 +117,8 @@ session.mount('https://', HTTPAdapter(max_retries=Retry(
 
 # ---- CORE UTILS, LOGGING EVERYWHERE ----
 def get_embedding_aoai(text, client=None):
+    if not EMBED_LOCALLY:
+        return None
     enc = tiktoken.encoding_for_model(EMBEDDING_MODEL_NAME)
     num_tokens = len(enc.encode(text))
     if num_tokens > EMBEDDING_TOKEN_LIMIT:
@@ -191,9 +203,9 @@ def is_allowed_link(link):
     host = urlparse(link).netloc.lower().replace("www.", "")
     return any(host == d or host.endswith(f".{d}") for d in ALLOW_DOMAINS)
 
-def upload_json(data, blob_name, container, last_modified=None):
+def upload_json(data, blob_name, container, last_modified=None, metadata=None):
     try:
-        meta = {}
+        meta = dict(metadata or {})
         if last_modified:
             meta["last_modified"] = last_modified
         payload = json.dumps(data, ensure_ascii=False, indent=2).encode()
@@ -201,7 +213,12 @@ def upload_json(data, blob_name, container, last_modified=None):
         blob_client = container.get_blob_client(blob_name)
         if blob_client.exists():
             props = blob_client.get_blob_properties()
-            blob_lastmod = props.metadata.get("last_modified") if props.metadata else None
+            existing_meta = props.metadata or {}
+            blob_lastmod = existing_meta.get("last_modified")
+            blob_hash = existing_meta.get("content_hash")
+            if meta.get("content_hash") and blob_hash == meta["content_hash"]:
+                log(f"Skipping unchanged content hash: {blob_name}")
+                return False
             if last_modified and blob_lastmod == last_modified:
                 log(f"Skipping unchanged content: {blob_name}")
                 return False
@@ -333,6 +350,8 @@ def extract_real_link(base_url, href):
     return normalize_url(abs_url)
 
 def split_by_tokens(text, max_tokens=EMBEDDING_TOKEN_LIMIT-100, overlap=TOKEN_OVERLAP):
+    if not EMBED_LOCALLY:
+        return [text]
     enc = tiktoken.encoding_for_model(EMBEDDING_MODEL_NAME)
     tokens = enc.encode(text)
     chunks = []
@@ -346,10 +365,66 @@ def split_by_tokens(text, max_tokens=EMBEDDING_TOKEN_LIMIT-100, overlap=TOKEN_OV
 
 # ----------- Chunking and Uploading -----------
 
-def emit_chunks(url, text, last_mod):
+def iso_utc_now():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+def content_hash_for(text):
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+def title_from_url(url):
+    path = urlparse(url).path.strip("/")
+    return path.rsplit("/", 1)[-1].replace("-", " ").replace("_", " ").strip() or urlparse(url).netloc
+
+def build_source_record(url, text, last_mod, content_type, title=None, depth=None, parent_url=None):
+    norm_url = normalize_url(url)
+    parsed = urlparse(norm_url)
+    content_hash = content_hash_for(text)
+    content_format = SOURCE_FORMAT
+    if content_format == "auto":
+        content_format = "markdown" if content_type == "text/markdown" else "text"
+    return {
+        "id": hashlib.sha256(norm_url.encode("utf-8")).hexdigest(),
+        "url": norm_url,
+        "canonical_url": norm_url,
+        "title": title or title_from_url(norm_url),
+        "content": text,
+        "content_format": content_format,
+        "content_type": content_type,
+        "crawl_timestamp": iso_utc_now(),
+        "last_modified": last_mod,
+        "site": parsed.netloc,
+        "path": parsed.path or "/",
+        "depth": depth,
+        "parent_url": normalize_url(parent_url) if parent_url else None,
+        "content_hash": content_hash,
+        "source_engine": CRAWLER_ENGINE,
+    }
+
+def emit_source_document(url, text, last_mod, content_type, title=None, depth=None, parent_url=None):
+    if not text or not text.strip():
+        log(f"Skipping empty content for {url}")
+        return
+    rec = build_source_record(url, text, last_mod, content_type, title, depth, parent_url)
+    filename = blob_name_for_url(rec["url"])
+    metadata = {
+        "content_hash": rec["content_hash"],
+        "source_engine": rec["source_engine"],
+        "content_type": rec["content_type"][:128],
+    }
+    if upload_json(rec, filename, content_container, last_modified=last_mod, metadata=metadata):
+        with collection_lock:
+            documents.append(rec)
+            sitemap_urls.append(rec["url"])
+
+def emit_chunks(url, text, last_mod, content_type="text/html", title=None, depth=None, parent_url=None):
     """
-    Split text into token-length chunks (for Azure OpenAI embedding), upload as JSON docs.
+    Emit normalized source documents by default. Set EMBED_LOCALLY=true to preserve
+    the legacy behavior of chunking and embedding inside the crawler.
     """
+    if OUTPUT_MODE == "source" or not EMBED_LOCALLY:
+        emit_source_document(url, text, last_mod, content_type, title, depth, parent_url)
+        return
+
     windows = split_by_tokens(text)
     embedding_client = openai.AzureOpenAI(
         api_key=api_key,
@@ -364,12 +439,21 @@ def emit_chunks(url, text, last_mod):
         log(f"Chunk {idx} of {url}: embedding type: {type(embedding)}, first 5: {embedding[:5] if embedding else embedding}")
         rec = {
             "id": uuid.uuid4().hex,
-            "url": url,
-            "title": sanitize(urlparse(url).path),
+            "url": normalize_url(url),
+            "canonical_url": normalize_url(url),
+            "title": title or sanitize(urlparse(url).path),
             "chunk_index": idx,
             "chunk_total": len(windows),
             "content": chunk,
+            "content_type": content_type,
+            "crawl_timestamp": iso_utc_now(),
             "last_modified": last_mod,
+            "site": urlparse(normalize_url(url)).netloc,
+            "path": urlparse(normalize_url(url)).path or "/",
+            "depth": depth,
+            "parent_url": normalize_url(parent_url) if parent_url else None,
+            "content_hash": content_hash_for(chunk),
+            "source_engine": CRAWLER_ENGINE,
             "embedding": embedding,
         }
         filename = blob_name_for_url(url, chunk_index=idx)
@@ -381,7 +465,7 @@ def emit_chunks(url, text, last_mod):
             seen.add(key)
 
 
-def handle_docx(url: str):
+def handle_docx(url: str, depth=None, parent_url=None):
     norm_url = normalize_url(url)
     log(f"Visiting DOCX: {norm_url}")
     try:
@@ -392,14 +476,14 @@ def handle_docx(url: str):
         if not content.strip():
             return
         last_mod = r.headers.get("Last-Modified", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
-        emit_chunks(norm_url, content, last_mod)
+        emit_chunks(norm_url, content, last_mod, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", depth=depth, parent_url=parent_url)
     except Exception as e:
         log(f"Error handling docx: {url} {e}")
         with collection_lock:
             failed.append({"url": url, "reason": f"DOCX parse error: {e}"})
 
 
-def handle_xlsx(url: str):
+def handle_xlsx(url: str, depth=None, parent_url=None):
     norm_url = normalize_url(url)
     log(f"Visiting XLSX: {norm_url}")
     try:
@@ -416,13 +500,13 @@ def handle_xlsx(url: str):
         if not content.strip():
             return
         last_mod = r.headers.get("Last-Modified", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
-        emit_chunks(norm_url, content, last_mod)
+        emit_chunks(norm_url, content, last_mod, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", depth=depth, parent_url=parent_url)
     except Exception as e:
         log(f"Error handling xlsx: {url} {e}")
         with collection_lock:
             failed.append({"url": url, "reason": f"XLSX parse error: {e}"})
 
-def handle_pdf(playwright_ctx, url: str):
+def handle_pdf(playwright_ctx, url: str, depth=None, parent_url=None):
     norm_url = normalize_url(url)
     log(f"Visiting PDF: {norm_url}")
     parsed = urlparse(url)
@@ -478,7 +562,7 @@ def handle_pdf(playwright_ctx, url: str):
         reader = PdfReader(BytesIO(r.content))
         raw = "".join(p.extract_text() or "" for p in reader.pages)
         lm = r.headers.get("Last-Modified", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
-        emit_chunks(norm_url, raw, lm)
+        emit_chunks(norm_url, raw, lm, "application/pdf", depth=depth, parent_url=parent_url)
         return
     log(f"All GET attempts failed; falling back to Playwright download")
     try:
@@ -491,7 +575,7 @@ def handle_pdf(playwright_ctx, url: str):
         reader = PdfReader(BytesIO(buffer))
         raw = "".join(p.extract_text() or "" for p in reader.pages)
         lm = download.suggested_filename
-        emit_chunks(norm_url, raw, lm)
+        emit_chunks(norm_url, raw, lm, "application/pdf", depth=depth, parent_url=parent_url)
         page.close()
         return
     except Exception as e:
@@ -504,7 +588,7 @@ def handle_pdf(playwright_ctx, url: str):
             pass
         return
 
-def handle_page(playwright_ctx, url: str):
+def handle_page(playwright_ctx, url: str, depth=None, parent_url=None):
     url = enforce_trailing_slash_if_directory(url)
     norm_url = normalize_url(url)
     log(f"Visiting HTML: {norm_url}")
@@ -605,7 +689,7 @@ def handle_page(playwright_ctx, url: str):
                         "Last-Modified",
                         time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                     )
-                    emit_chunks(fragment_url, pane_text, last_mod)
+                    emit_chunks(fragment_url, pane_text, last_mod, "text/html", depth=depth, parent_url=norm_url)
         rendered_html = str(soup)
         full_text = extract_main_content(rendered_html)
         if len(full_text) > MAX_CONTENT_CHARS:
@@ -622,7 +706,8 @@ def handle_page(playwright_ctx, url: str):
         else:
             main_text = full_text
         last_mod = headers.get("Last-Modified", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
-        emit_chunks(norm_url, main_text, last_mod)
+        page_title = soup.title.get_text(strip=True) if soup and soup.title else None
+        emit_chunks(norm_url, main_text, last_mod, "text/html", page_title, depth, parent_url)
         pg.close()
         return filtered_links
     except Exception as e:
@@ -643,7 +728,7 @@ def enforce_trailing_slash_if_directory(url):
 # ----------- BFS Crawler (Parallel) -----------
 
 def crawl_worker(task):
-    url, depth, max_depth = task
+    url, depth, max_depth, parent_url = task
     norm_url = normalize_url(url)
     results = []
     log(f"WORKER starting {url} (depth={depth})")
@@ -666,15 +751,15 @@ def crawl_worker(task):
         try:
             lower_url = norm_url.lower()
             if lower_url.endswith(".pdf") and INCLUDE_PDFS:
-                handle_pdf(ctx, url)
+                handle_pdf(ctx, url, depth, parent_url)
             elif lower_url.endswith(".docx") and INCLUDE_DOCX:
-                handle_docx(url)
+                handle_docx(url, depth, parent_url)
             elif lower_url.endswith(".xlsx") and INCLUDE_XLSX:
-                handle_xlsx(url)
+                handle_xlsx(url, depth, parent_url)
             elif lower_url.endswith(".doc") or lower_url.endswith(".xls"):
                 log(f"Skipping unsupported Office format: {norm_url}")
             else:
-                results = handle_page(ctx, url)
+                results = handle_page(ctx, url, depth, parent_url)
         except Exception as e:
             log(f"Worker error: {e}")
         finally:
@@ -688,14 +773,14 @@ def bfs_crawl_parallel(seed_urls):
     for seed_url in seed_urls:
         norm_seed = normalize_url(seed_url)
         if norm_seed not in visited:
-            queue.append((seed_url, 0))
+            queue.append((seed_url, 0, None))
             visited.add(norm_seed)
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = dict()
         while queue or futures:
             while len(futures) < MAX_WORKERS and queue:
-                url, depth = queue.popleft()
-                task = (url, depth, MAX_DEPTH)
+                url, depth, parent_url = queue.popleft()
+                task = (url, depth, MAX_DEPTH, parent_url)
                 log(f"Submitting {url} at depth {depth} to threadpool (queue size={len(queue)})")
                 future = executor.submit(crawl_worker, task)
                 futures[future] = (url, depth)
@@ -710,7 +795,7 @@ def bfs_crawl_parallel(seed_urls):
                             with collection_lock:
                                 if norm_link not in visited:
                                     visited.add(norm_link)
-                                    queue.append((link, depth + 1))
+                                    queue.append((link, depth + 1, url))
                                     log(f"Queued new URL: {link} (depth={depth+1})")
                 except Exception as e:
                     log(f"Crawl task failed for {url}: {e}")
@@ -718,6 +803,15 @@ def bfs_crawl_parallel(seed_urls):
 def start_crawl():
     log(f"MAX_WORKERS is {MAX_WORKERS}")
     try:
+        if CRAWLER_ENGINE == "firecrawl":
+            start_firecrawl()
+            return
+        if CRAWLER_ENGINE == "apify":
+            start_apify()
+            return
+        if CRAWLER_ENGINE != "native":
+            raise ValueError("CRAWLER_ENGINE must be one of: native, firecrawl, apify")
+
         seeds = [u.strip() for u in os_env("BASE_URLS", "").split(";") if u.strip()]
         for s in seeds:
             ALLOW_DOMAINS.add(urlparse(s).netloc.lower().replace("www.", ""))
@@ -746,6 +840,114 @@ def start_crawl():
         if documents:
             upload_json(documents, "docs.json", logs_container)
         log(f"Crawl complete. Total URLs Visited: {len(visited)}, Failed: {len(failed)}")
+
+
+def external_text_and_metadata(item):
+    metadata = item.get("metadata") or item.get("meta") or {}
+    url = (
+        item.get("url")
+        or item.get("sourceURL")
+        or item.get("sourceUrl")
+        or metadata.get("sourceURL")
+        or metadata.get("url")
+    )
+    title = item.get("title") or metadata.get("title")
+    text = item.get("markdown") or item.get("text") or item.get("content") or item.get("html") or ""
+    content_type = item.get("contentType") or metadata.get("contentType") or "text/markdown"
+    last_mod = item.get("lastModified") or metadata.get("lastModified") or iso_utc_now()
+    return url, title, text, content_type, last_mod
+
+
+def emit_external_items(items):
+    for item in items:
+        url, title, text, content_type, last_mod = external_text_and_metadata(item)
+        if not url:
+            with collection_lock:
+                failed.append({"url": "", "reason": "External crawler item did not include a source URL"})
+            continue
+        emit_chunks(url, text, last_mod, content_type, title)
+
+
+def start_firecrawl():
+    api_key = os_env("FIRECRAWL_API_KEY")
+    limit = int(os_env("FIRECRAWL_LIMIT", "1000"))
+    seeds = [u.strip() for u in os_env("BASE_URLS", "").split(";") if u.strip()]
+    if not seeds:
+        raise ValueError("BASE_URLS must include at least one URL for Firecrawl")
+
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    for seed in seeds:
+        payload = {
+            "url": seed,
+            "limit": limit,
+            "maxDepth": MAX_DEPTH,
+            "scrapeOptions": {
+                "formats": ["markdown"],
+                "onlyMainContent": True,
+            },
+        }
+        log(f"Starting Firecrawl crawl for {seed}")
+        response = requests.post("https://api.firecrawl.dev/v2/crawl", headers=headers, json=payload, timeout=60)
+        response.raise_for_status()
+        job_id = response.json().get("id")
+        if not job_id:
+            raise RuntimeError(f"Firecrawl did not return a crawl id: {response.text}")
+
+        while True:
+            status_response = requests.get(f"https://api.firecrawl.dev/v2/crawl/{job_id}", headers=headers, timeout=60)
+            status_response.raise_for_status()
+            status = status_response.json()
+            emit_external_items(status.get("data", []))
+            if status.get("status") == "completed":
+                break
+            if status.get("status") in {"failed", "cancelled"}:
+                raise RuntimeError(f"Firecrawl crawl {job_id} ended with status {status.get('status')}")
+            time.sleep(float(os_env("EXTERNAL_CRAWL_POLL_SECONDS", "10")))
+
+
+def start_apify():
+    token = os_env("APIFY_API_TOKEN")
+    if not token:
+        raise ValueError("APIFY_API_TOKEN is required when CRAWLER_ENGINE=apify")
+    actor_id = quote(os_env("APIFY_ACTOR_ID", "apify/website-content-crawler").replace("/", "~"), safe="~")
+    seeds = [u.strip() for u in os_env("BASE_URLS", "").split(";") if u.strip()]
+    if not seeds:
+        raise ValueError("BASE_URLS must include at least one URL for Apify")
+
+    default_input = {
+        "startUrls": [{"url": url} for url in seeds],
+        "maxCrawlDepth": MAX_DEPTH,
+        "maxCrawlPages": int(os_env("APIFY_MAX_CRAWL_PAGES", "1000")),
+    }
+    apify_input_json = os_env("APIFY_INPUT_JSON")
+    actor_input = json.loads(apify_input_json) if apify_input_json else default_input
+    wait_seconds = int(os_env("APIFY_WAIT_FOR_FINISH_SECONDS", "120"))
+    run_url = f"https://api.apify.com/v2/acts/{actor_id}/runs?token={token}&waitForFinish={wait_seconds}"
+    log(f"Starting Apify actor {actor_id}")
+    response = requests.post(run_url, json=actor_input, timeout=wait_seconds + 30)
+    response.raise_for_status()
+    run = response.json().get("data", {})
+    run_id = run.get("id")
+    while run.get("status") not in {"SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"}:
+        if not run_id:
+            break
+        time.sleep(float(os_env("EXTERNAL_CRAWL_POLL_SECONDS", "10")))
+        run_response = requests.get(f"https://api.apify.com/v2/actor-runs/{run_id}?token={token}", timeout=60)
+        run_response.raise_for_status()
+        run = run_response.json().get("data", {})
+    if run.get("status") in {"FAILED", "ABORTED", "TIMED-OUT"}:
+        raise RuntimeError(f"Apify run {run_id} ended with status {run.get('status')}")
+    dataset_id = run.get("defaultDatasetId")
+    if not dataset_id:
+        raise RuntimeError(f"Apify did not return a default dataset id: {response.text}")
+
+    items_url = f"https://api.apify.com/v2/datasets/{dataset_id}/items?token={token}&clean=true&format=json"
+    items_response = requests.get(items_url, timeout=120)
+    items_response.raise_for_status()
+    emit_external_items(items_response.json())
 
 if __name__ == "__main__":
     start_crawl()

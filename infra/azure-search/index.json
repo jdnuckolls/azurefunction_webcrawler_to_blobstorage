@@ -1,0 +1,177 @@
+{
+  "name": "{{searchIndexName}}",
+  "fields": [
+    {
+      "name": "chunk_id",
+      "type": "Edm.String",
+      "key": true,
+      "filterable": true,
+      "sortable": true,
+      "retrievable": true
+    },
+    {
+      "name": "parent_id",
+      "type": "Edm.String",
+      "filterable": true,
+      "retrievable": true
+    },
+    {
+      "name": "url",
+      "type": "Edm.String",
+      "filterable": true,
+      "sortable": true,
+      "retrievable": true
+    },
+    {
+      "name": "canonical_url",
+      "type": "Edm.String",
+      "filterable": true,
+      "retrievable": true
+    },
+    {
+      "name": "title",
+      "type": "Edm.String",
+      "searchable": true,
+      "filterable": true,
+      "sortable": true,
+      "retrievable": true
+    },
+    {
+      "name": "content",
+      "type": "Edm.String",
+      "searchable": true,
+      "retrievable": true
+    },
+    {
+      "name": "content_vector",
+      "type": "Collection(Edm.Single)",
+      "searchable": true,
+      "retrievable": false,
+      "dimensions": 1536,
+      "vectorSearchProfile": "aoai-profile"
+    },
+    {
+      "name": "content_format",
+      "type": "Edm.String",
+      "filterable": true,
+      "facetable": true,
+      "retrievable": true
+    },
+    {
+      "name": "content_type",
+      "type": "Edm.String",
+      "filterable": true,
+      "facetable": true,
+      "retrievable": true
+    },
+    {
+      "name": "crawl_timestamp",
+      "type": "Edm.DateTimeOffset",
+      "filterable": true,
+      "sortable": true,
+      "retrievable": true
+    },
+    {
+      "name": "last_modified",
+      "type": "Edm.String",
+      "filterable": true,
+      "sortable": true,
+      "retrievable": true
+    },
+    {
+      "name": "site",
+      "type": "Edm.String",
+      "filterable": true,
+      "facetable": true,
+      "retrievable": true
+    },
+    {
+      "name": "path",
+      "type": "Edm.String",
+      "filterable": true,
+      "retrievable": true
+    },
+    {
+      "name": "depth",
+      "type": "Edm.Int32",
+      "filterable": true,
+      "sortable": true,
+      "facetable": true,
+      "retrievable": true
+    },
+    {
+      "name": "parent_url",
+      "type": "Edm.String",
+      "filterable": true,
+      "retrievable": true
+    },
+    {
+      "name": "content_hash",
+      "type": "Edm.String",
+      "filterable": true,
+      "retrievable": true
+    },
+    {
+      "name": "source_engine",
+      "type": "Edm.String",
+      "filterable": true,
+      "facetable": true,
+      "retrievable": true
+    }
+  ],
+  "vectorSearch": {
+    "algorithms": [
+      {
+        "name": "hnsw-algorithm",
+        "kind": "hnsw"
+      }
+    ],
+    "profiles": [
+      {
+        "name": "aoai-profile",
+        "algorithm": "hnsw-algorithm",
+        "vectorizer": "aoai-vectorizer"
+      }
+    ],
+    "vectorizers": [
+      {
+        "name": "aoai-vectorizer",
+        "kind": "azureOpenAI",
+        "azureOpenAIParameters": {
+          "resourceUri": "{{azureOpenAIEndpoint}}",
+          "deploymentId": "{{azureOpenAIEmbeddingDeployment}}",
+          "modelName": "text-embedding-3-small",
+          "apiKey": "{{azureOpenAIKey}}"
+        }
+      }
+    ]
+  },
+  "semantic": {
+    "configurations": [
+      {
+        "name": "semantic-config",
+        "prioritizedFields": {
+          "titleField": {
+            "fieldName": "title"
+          },
+          "prioritizedContentFields": [
+            {
+              "fieldName": "content"
+            }
+          ],
+          "prioritizedKeywordsFields": [
+            {
+              "fieldName": "site"
+            },
+            {
+              "fieldName": "content_type"
+            },
+            {
+              "fieldName": "source_engine"
+            }
+          ]
+        }
+      }
+    ]
+  }
+}
