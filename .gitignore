@@ -1,49 +1,45 @@
-bin
-obj
-csx
-.vs
-edge
-Publish
-
-*.user
-*.suo
-*.cscfg
-*.Cache
-project.lock.json
-
-/packages
-/TestResults
-
-/tools/NuGet.exe
-/App_Data
-/secrets
-/data
-.secrets
-appsettings.json
-local.settings.json
-
-node_modules
-dist
-
-# Local python packages
-.python_packages/
-
-# Python Environments
+# Local development
 .env
-.venv
+.venv/
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
 .vscode/
+.idea/
+.azure/
 
-# Byte-compiled / optimized / DLL files
+# Secrets and local Azure Functions settings
+appsettings.json
+local.settings.json
+/secrets/
+.secrets
+
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
+.python_packages/
+.pytest_cache/
 
-# Azurite artifacts
-__blobstorage__
-__queuestorage__
+# Build and package outputs
+bin/
+obj/
+dist/
+build/
+Publish/
+*.log
+*.zip
+*.tgz
+
+# Azure Functions and Azurite artifacts
+App_Data/
+__blobstorage__/
+__queuestorage__/
 __azurite_db*__.json
+
+# Node or tooling artifacts
+node_modules/
+packages/
+TestResults/

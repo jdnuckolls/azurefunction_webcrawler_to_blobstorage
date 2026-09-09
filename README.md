@@ -129,7 +129,7 @@ Each uploaded content blob is a JSON document similar to:
 
 Configure an Azure AI Search Blob indexer over this container and use integrated vectorization to split `content`, generate embeddings, and populate your search index.
 
-See [Azure AI Search integrated vectorization](docs/azure-ai-search.md) for starter index, data source, skillset, and indexer templates.
+See [Azure AI Search integrated vectorization](docs/azure-ai-search.md) for starter index, data source, skillset, and indexer templates, and [Three-repo architecture](docs/architecture.md) for the full crawler-to-chatbot portfolio story.
 
 ## Crawler engine options
 
