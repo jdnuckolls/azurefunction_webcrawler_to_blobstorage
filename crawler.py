@@ -506,6 +506,57 @@ def handle_xlsx(url: str, depth=None, parent_url=None):
         with collection_lock:
             failed.append({"url": url, "reason": f"XLSX parse error: {e}"})
 
+
+def handle_download_url(url: str, depth=None, parent_url=None):
+    norm_url = normalize_url(url)
+    log(f"Handling browser download URL: {norm_url}")
+    try:
+        r = session.get(url, allow_redirects=True, timeout=(10, PDF_DOWNLOAD_TIMEOUT_MS / 1000))
+        r.raise_for_status()
+        descriptor = " ".join([
+            url.lower(),
+            r.headers.get("Content-Type", "").lower(),
+            r.headers.get("Content-Disposition", "").lower(),
+        ])
+        last_mod = r.headers.get("Last-Modified", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+
+        if "pdf" in descriptor:
+            if len(r.content) > MAX_PDF_BYTES:
+                log(f"Skipping large PDF download: {norm_url} ({len(r.content)} bytes)")
+                return True
+            reader = PdfReader(BytesIO(r.content))
+            raw = "".join(p.extract_text() or "" for p in reader.pages)
+            emit_chunks(norm_url, raw, last_mod, "application/pdf", depth=depth, parent_url=parent_url)
+            return True
+
+        if ".docx" in descriptor or "wordprocessingml.document" in descriptor:
+            doc = DocxDocument(BytesIO(r.content))
+            content = "\n".join(para.text for para in doc.paragraphs)
+            emit_chunks(norm_url, content, last_mod, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", depth=depth, parent_url=parent_url)
+            return True
+
+        if ".xlsx" in descriptor or "spreadsheetml.sheet" in descriptor:
+            xls = pd.ExcelFile(BytesIO(r.content))
+            text_chunks = []
+            for sheet in xls.sheet_names:
+                df = xls.parse(sheet, dtype=str, na_filter=False)
+                for row in df.astype(str).values.tolist():
+                    text_chunks.append(" ".join(row))
+            emit_chunks(norm_url, "\n".join(text_chunks), last_mod, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", depth=depth, parent_url=parent_url)
+            return True
+
+        if "text/html" in descriptor:
+            return False
+
+        log(f"Skipping unsupported browser download: {norm_url} ({r.headers.get('Content-Type', 'unknown content type')})")
+        return True
+    except Exception as e:
+        log(f"Download URL handling failed for {url}: {e}")
+        with collection_lock:
+            failed.append({"url": url, "reason": f"Download handling error: {e}"})
+        return True
+
+
 def handle_pdf(playwright_ctx, url: str, depth=None, parent_url=None):
     norm_url = normalize_url(url)
     log(f"Visiting PDF: {norm_url}")
@@ -633,6 +684,10 @@ def handle_page(playwright_ctx, url: str, depth=None, parent_url=None):
                 log(f"HTML fetch attempt {attempt + 1} failed: {e}")
                 time.sleep(REQUEST_DELAY * (RETRY_BACKOFF ** attempt))
             except Exception as e:
+                if "Download is starting" in str(e):
+                    if handle_download_url(url, depth=depth, parent_url=parent_url):
+                        pg.close()
+                        return []
                 log(f"HTML fetch attempt {attempt + 1} failed: {e}")
                 time.sleep(REQUEST_DELAY * (RETRY_BACKOFF ** attempt))
         if soup is None:
